@@ -1,2 +1,5 @@
 /target
 /worktrees
+~syncthing~*.tmp
+.syncthing*
+*.sync-conflict-*
