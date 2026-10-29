@@ -85,7 +85,8 @@ The size limit exists because a rename is a fast gesture and a 40 GiB video is n
 | Event shape | A platform may report a rename as one event with two paths, as two events with one path each, or both. The feeder handles all three; splitting is not an error |
 | Duplicates | Linux reports the same rename as `From`, `To` and `Both`. Facts are deduped by source and target within a batch |
 | Unmatched source | A `From` with no `To` by the end of the batch is a file that left the tree, not a rename |
-| Chains | A rename chain inside one batch, `a.heic` to `a.jpg` to `a.webp`, collapses to one job from the first source to the last target, keeping the last intent. Converting the intermediate would re-encode twice and produce a file nobody asked for |
+| Chains, same batch | A rename chain inside one batch, `a.heic` to `a.jpg` to `a.webp`, collapses to one job from the first source to the last target, keeping the last intent. Converting the intermediate would re-encode twice and produce a file nobody asked for |
+| Chains, later batch | The chain is resolved against the job that already exists: queued or running work is cancelled and retargeted to the original source, finished work is left alone. Sequence in `docs/state.md` §5.3 |
 
 ## 8. Churn protection
 

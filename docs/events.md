@@ -98,7 +98,7 @@ No `Both` event exists on this platform. A rename is always two events, each car
 - **Chains must be collapsed.** A double rename arrives as two facts with an intermediate file the user never asked for. Converting the intermediate would re-encode twice, which is why `coalesce` exists and why it lives in the library rather than in a caller
 - **Moves are not renames on Windows**, which satisfies for free. The opposite of Linux, where the same gesture arrives as a rename and is rejected only by the parent check
 - **Victims of a rename produce removals**, so a removal is not a failure and not a trigger
-- **`rename then delete` produces a fact here**, exactly where Linux suppresses it, because identity is unavailable. Dispatch therefore has to check that the target still exists, which `docs/watch.md` §7 requires and this transcript demonstrates
+- **`rename then delete` produces a fact here**, exactly where Linux suppresses it, because identity is unavailable. Dispatch therefore has to check that the target still exists, which `docs/watch.md` §7 requires and this transcript demonstrates. The gesture is rare, but the failure it prevents is not: a deleted name can be recreated within the same window by an unrelated file, and dispatching on the name alone would convert bytes the user never touched
 - **File identity is still unavailable.** `std` exposes no file id on Windows, so the identity column is empty by construction. Pairing plus coalescing covers every scenario above, which downgrades the Win32 shim from "required for correctness" to "required for robustness against a lost pair"
 
 ### 2.4 Consequences

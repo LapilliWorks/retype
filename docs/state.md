@@ -136,6 +136,30 @@ Resume skips outputs whose recorded identity matches a file that still exists wi
 
 Resume is therefore available for as long as the undo record survives retention, and unavailable afterwards. That coupling is deliberate rather than incidental: it makes retention a single, documented knob instead of two.
 
+## 5.3 Supersession
+
+A rename chain that spans two batches cannot be coalesced, so it has to be resolved against the job that is already running.
+
+```
+job A: source photo.heic, target photo.jpg     (running)
+fact B: source photo.jpg,  target photo.webp
+```
+
+Rules, in order:
+
+1. If A has already finished, B is an ordinary job from `photo.jpg`. The second encode happens because time passed, and there is nothing to undo
+2. If A is queued and has not started, cancel it and retarget: the job becomes `photo.heic` to `photo.webp`, with B's intent. Nothing was spent
+3. If A is running, cancel it, discard its partial outputs, and replace it the same way. The spent work is lost, and that is the intended outcome: the user kept changing their mind, and finishing the old job would produce a file they no longer want
+
+Replacement is not only a target change. Two details make it safe:
+
+- **The source name is restored first.** A had renamed `photo.heic` to `photo.jpg` and not yet committed an output, so that path held the source bytes under the wrong extension. It is renamed back before the replacement starts. A previous job's target is never left lying while its replacement runs
+- **The replacement consumes its source.** It reads `photo.heic`, writes `photo.webp`, and removes `photo.heic` on commit, because the rename that started the chain moved the file. A job therefore carries `consume_source`, true for rename-derived jobs and false for `retype convert`, which never deletes what it was given
+
+If the restored source name is already taken, by a file the user created or by another rename, the restore is refused and B becomes an ordinary job from A's target instead. A wrong file is worse than a second encode.
+
+The undo record follows the bytes, not the job: A's record already holds the source inode, so the replacement adopts it and A becomes `superseded`. One record, one restore target.
+
 ## 6. Startup reconciliation
 
 1. Acquire the lock. Failure means another daemon owns the state directory, and the process exits with that message
