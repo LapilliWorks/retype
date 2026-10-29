@@ -37,8 +37,7 @@ raw: Modify(Name(Both)) e.heic -> e.jpg
 raw: Modify(Name(From)) e.jpg
 raw: Modify(Name(To)) e.webp
 raw: Modify(Name(Both)) e.jpg -> e.webp
-pair: e.heic (heic) -> e.jpg intent=jpg
-pair: e.jpg (jpg) -> e.webp intent=webp
+pair: e.heic (heic) -> e.webp intent=webp
 identity: e.heic (heic) -> e.webp intent=webp
 
 ## rename over an existing file
