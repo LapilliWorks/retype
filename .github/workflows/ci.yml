@@ -3,9 +3,11 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +23,7 @@ jobs:
       - run: cargo test --workspace
 
   msrv:
+    name: msrv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,3 +31,34 @@ jobs:
         with:
           toolchain: "1.85.0"
       - run: cargo test --workspace
+
+  cross:
+    name: cross check (typecheck foreign targets)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-apple-darwin, x86_64-unknown-freebsd]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+  probe:
+    name: event probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Probe
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run -q -p retype-core --example probe_events | tee "probe-${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.os }}
+          path: probe-${{ matrix.os }}.txt
+          if-no-files-found: error
