@@ -105,9 +105,41 @@ No `Both` event exists on this platform. A rename is always two events, each car
 
 Three rules were written because of this platform, not guessed from it: cross-event pairing, chain coalescing within a batch, and a dispatch-time existence check. Linux needed none of them to work, and Linux could not have revealed any of them.
 
-## 3. macOS (FSEvents)
+## 3. macOS (FSEvents, notify 8)
 
-Not yet measured. Run the probe on macOS and replace this section. The expectation from the backend source is a `From` event and single-path `Any` events, with no `Both`, which would make identity correlation the primary mechanism rather than a redundancy.
+Measured 2026-10-29, transcript `docs/probe/macos-2026-10-29.txt`. Paths in the transcript are normalised to `<tmp>`.
+
+### 3.1 Raw events
+
+```
+Modify(Name(Any))   a.heic
+Modify(Data(Content)) a.heic
+Modify(Name(Any))   a.jpg
+```
+
+One event per path, never two, and no `From`, `To` or `Both`. A rename is indistinguishable from any other name change except by the paths themselves. Writes appear as `Modify(Data(Content))`, and a rename is usually followed by `Modify(Metadata(Any))`, because the system attaches attributes.
+
+### 3.2 Scenario results
+
+| Scenario | Pair | Identity |
+|---|---|---|
+| Rename in place | none | `a.heic -> a.jpg` |
+| Rename case only | none | none |
+| Rename stem and extension | none | none |
+| Rename across directories | none | none |
+| Two renames in one window | none | `e.heic -> e.webp` |
+| Rename over an existing file | none | `f.heic -> f.jpg` |
+| Twenty renames in one gesture | none | twenty facts |
+| Rename then write | none | one fact |
+| Rename then delete | none | none |
+
+### 3.3 What this establishes
+
+- **Identity is the only mechanism here.** There is no pair of names to match, so `rename_from` and `rename_to` are dead code on this platform and the feed-order rule from §1.5 is load bearing rather than defensive
+- **No fallback exists.** On Linux and Windows a lost pair or a missing identity still leaves the other strategy. On macOS, a file whose identity is unreliable, such as one on a network mount or a dataless iCloud placeholder, is silently not converted. That is one more reason network filesystems are a separate stage rather than an afternoon of work
+- **Cross-directory moves are reported as renames** and rejected only by the parent check, which is the third distinct platform behaviour for the same gesture: a rename on Linux, delete plus create on Windows, a rename-shaped event here
+- **A rename followed by a delete yields nothing**, because identity correlation refuses a fact whose target is gone. The dispatch-time existence check is therefore redundant here and necessary on Windows, which is why it lives in the dispatcher rather than in the correlator
+- **Paths must be canonical.** FSEvents reports resolved paths, so `/var` arrives as `/private/var`. A watch root that is a symlink, or a path that traverses one, would otherwise produce two identities for one file. The daemon canonicalises roots at registration and canonicalises event paths before lookup. This is also why the probe canonicalises its temporary root, or every printed path is absolute
 
 ## 4. BSD (kqueue)
 
@@ -117,12 +149,12 @@ Not yet measured, and not before the port. The backend reports a single-path `An
 
 | | Linux | Windows | macOS | BSD |
 |---|---|---|---|---|
-| Rename as one event with both paths | yes (`Both`) | no | no (expected) | no (expected) |
-| Rename as separate `From` and `To` | yes, in addition | yes | `From` plus `Any` | `Any` only |
-| Cross-directory move reported as rename | yes | no | unknown | unknown |
-| Rename followed by delete yields a fact | no | yes | unknown | unknown |
+| Rename as one event with both paths | yes (`Both`) | no | no | no (expected) |
+| Rename as separate `From` and `To` | yes, in addition | yes | no | no (expected) |
+| Cross-directory move reported as rename | yes | no | yes | unknown |
+| Rename followed by delete yields a fact | no | yes | no | unknown |
 | File identity available | yes | needs Win32 | yes | yes |
-| Primary strategy | identity, pairing as backup | pairing plus coalescing | identity (expected) | identity (expected) |
-| Rules the platform forced | duplicate suppression, feed order | cross-event pairing, chain coalescing, existence check | pending | pending |
+| Primary strategy | identity, pairing as backup | pairing plus coalescing | identity only | identity only (expected) |
+| Rules the platform forced | duplicate suppression, feed order | cross-event pairing, chain coalescing, existence check | canonical paths; no fallback when identity is unavailable | pending |
 
 The lesson from two platforms: no single event shape covers both, so the correlator must accept both a two-path event and a pair of events, and the daemon must feed whichever its platform produces. `docs/watch.md` §7 records the resulting obligations.

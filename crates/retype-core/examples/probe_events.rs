@@ -119,7 +119,10 @@ fn scenarios() -> Vec<Scenario> {
 
 fn main() -> Result<(), Box<dyn Error>> {
 	let dir = tempfile::tempdir()?;
-	let root = dir.path().to_path_buf();
+	// Canonicalised because macOS resolves `/var` to `/private/var`, and the
+	// event stream reports resolved paths. Without it every printed path is
+	// absolute and the transcript is unreadable.
+	let root = dir.path().canonicalize()?;
 	fs::create_dir(root.join("sub"))?;
 
 	let (tx, rx) = mpsc::channel();
