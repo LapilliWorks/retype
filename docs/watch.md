@@ -82,7 +82,7 @@ The size limit exists because a rename is a fast gesture and a 40 GiB video is n
 | Ordering | Queue order follows the earliest event in the batch, not arrival order of the last |
 | Self-inflicted events | Recognised by temp prefix and by identity, and never treated as user intent |
 | Batch order | Within one debounced batch, observe paths that exist before forgetting paths that are gone. Reversed, identity correlation loses every rename, which is invisible on Linux and fatal elsewhere. Measured in `docs/events.md` §1.5 |
-| Existence check | A rename fact is dispatched only if the target still exists. The identity strategy produces no fact for a rename followed by a delete, which is the correct answer |
+| Existence check | A rename fact is dispatched only if the target still exists and is a regular file. A symlink is not followed and a directory is not a candidate, because a directory whose name carries an extension is still a directory and following a link would write outside the tree. The identity strategy produces no fact for a rename followed by a delete, which is the correct answer |
 | Data events | A write to a renamed file is not a second trigger. Only rename observations are fed to the correlator |
 | Event shape | A platform may report a rename as one event with two paths, as two events with one path each, or both. The feeder handles all three; splitting is not an error |
 | Duplicates | Linux reports the same rename as `From`, `To` and `Both`. Facts are deduped by source and target within a batch |

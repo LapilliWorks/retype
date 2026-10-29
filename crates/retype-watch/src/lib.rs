@@ -179,6 +179,14 @@ fn sightings(batch: &Batch) -> Vec<(PathBuf, Option<Sighting>)> {
 
 fn sighting(path: &Path) -> Option<Sighting> {
 	let meta = fs::symlink_metadata(path).ok()?;
+	// Directories appear in the stream, Windows reports the parent on a move,
+	// and a symlink is not a file we may convert. Recording them as absent
+	// forgets them instead of correlating them: without this a directory named
+	// `a.heic` renamed to `a.jpg` is a conversion.
+	if !meta.is_file() {
+		return None;
+	}
+
 	Some(Sighting {
 		path: path.to_path_buf(),
 		identity: identity(&meta)?,
@@ -406,6 +414,62 @@ mod tests {
 		);
 
 		assert_eq!(facts.len(), 1, "both strategies saw one gesture");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn a_directory_is_never_a_rename() {
+		let dir = dir();
+		let source = dir.path().join("a.heic");
+		let target = dir.path().join("a.jpg");
+		fs::create_dir(&source).unwrap();
+
+		let mut correlator = fresh();
+		feed_identity(&mut correlator, &batch(vec![created(&source)]));
+		fs::rename(&source, &target).unwrap();
+
+		let facts = feed_identity(
+			&mut correlator,
+			&batch(vec![
+				rename(RenameMode::Any, &[&source]),
+				rename(RenameMode::Any, &[&target]),
+			]),
+		);
+
+		assert!(
+			facts.is_empty(),
+			"a directory is not a conversion, whatever it is called"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn a_symlink_is_never_tracked() {
+		use std::os::unix::fs::symlink;
+
+		let dir = dir();
+		let real = dir.path().join("real.heic");
+		let source = dir.path().join("a.heic");
+		let target = dir.path().join("a.jpg");
+		fs::write(&real, b"heic").unwrap();
+		symlink(&real, &source).unwrap();
+
+		let mut correlator = fresh();
+		feed_identity(&mut correlator, &batch(vec![created(&source)]));
+		fs::rename(&source, &target).unwrap();
+
+		let facts = feed_identity(
+			&mut correlator,
+			&batch(vec![
+				rename(RenameMode::Any, &[&source]),
+				rename(RenameMode::Any, &[&target]),
+			]),
+		);
+
+		assert!(
+			facts.is_empty(),
+			"following a link would convert something outside the tree"
+		);
 	}
 
 	#[test]
