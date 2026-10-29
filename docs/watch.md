@@ -36,8 +36,10 @@ Evaluated in order, first match wins.
 | Temp files of the tool itself | Always ignored: the `.retype-in.` and `.retype-out.` prefixes |
 | Directories in the ignore list | `.git`, `.hg`, `.svn`, `node_modules`, `target`, `.venv`, `__pycache__`, `System Volume Information`, `$RECYCLE.BIN`, `.Trash`, `.Trashes` |
 | Hidden directories | Ignored unless `watch_hidden = true` |
-| User globs | `ignore = ['**/Library/Caches/**', '*.tmp']` in the user configuration |
+| User globs | `ignore = ['**/Library/Caches/**', '*.tmp']` in the user configuration, `docs/config.md` §5 |
 | Directory patterns | `patterns = ['*.jpg']` in `.retype.toml`, which restricts what is considered at all |
+
+`ignore` adds to the built-in list and cannot remove an entry from it. The only way past a built-in entry is to register a directory inside it explicitly, because naming a directory is intent.
 
 Ignoring a directory prunes the whole subtree, including identity priming. Ignoring a file pattern only skips conversion; the file is still primed.
 
@@ -55,7 +57,7 @@ Registration is refused with `E_USAGE_ARGS` when the path is inside a known plac
 | Windows | `%USERPROFILE%\OneDrive*`, `\Cloud\` mirrors, `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` on a registered file |
 | Linux | `gvfs` and FUSE mounts that report `EAGAIN` on read |
 
-The refusal names the provider and says that support is planned as a separate stage. `allow_synced = true` in the user configuration overrides it for people who have checked that their provider keeps full local copies.
+The refusal names the provider and says that support is planned as a separate stage. `allow_synced = true` in the user configuration overrides it for people who have checked that their provider keeps full local copies. That key is user configuration only: a directory file may not set it, because a directory that arrives from an untrusted source must not be able to opt the machine into a provider whose placeholders it cannot see.
 
 Ordinary sync clients are unaffected, because there is nothing to detect: Dropbox with files available offline, Syncthing, rsync targets and git worktrees are ordinary local directories, and refusing them would be both wrong and infuriating. The rule is about placeholders, not about the word "sync".
 
@@ -65,8 +67,8 @@ Dataless and recall-on-access files encountered inside an ordinary registration 
 
 | Limit | Default | Behaviour over the limit |
 |---|---|---|
-| Source size for automatic conversion | 4 GiB | Skipped, logged, counted. `retype convert` is unaffected |
-| Batch size per debounce window | 64 files | Queue admission is delayed until the next window |
+| Source size for automatic conversion | 4 GiB, `watch.max_source_size` | Skipped, logged, counted. `retype convert` is unaffected |
+| Batch size per debounce window | 64 files, fixed | Queue admission is delayed until the next window |
 
 The size limit exists because a rename is a fast gesture and a 40 GiB video is not. Automatic conversion of something that large needs to be asked for, which is what `retype convert` is for.
 
@@ -93,8 +95,10 @@ The size limit exists because a rename is a fast gesture and a 40 GiB video is n
 
 A directory can produce more rename events than any queue should absorb, for example a build system writing through a watched tree. Rules:
 
-- Above 256 queued jobs, new automatic jobs are dropped with a warning and a counter, and the notification says conversion is paused rather than pretending it succeeded
+- Above 256 queued jobs, new automatic jobs are dropped with a warning and a counter, and the notification says conversion is paused rather than pretending it succeeded. The cap is fixed; a machine with a different number of cores does not get a different answer
 - `pause` and `resume` exist as `retype watch --pause <dir>` and `--resume <dir>`, and as a switch in the directory file (`paused = true`) so a project can ship the setting
+
+A pause is state; `paused = true` in a directory file is policy. Policy wins, because a committed project setting must not be silently undone by a client that resumed once and departed. Resuming a policy-paused directory is refused with `E_WATCH_PAUSED_BY_POLICY`, naming the file to edit, which is the only case where the two can disagree.
 
 ## 9. Network filesystems
 

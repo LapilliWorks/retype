@@ -132,7 +132,32 @@ args = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
 | `aliases` | Alternate extension spellings, resolved by the grammar |
 | `argv.<tool>` | Fragment contributed by the format to that tool's `{ops}` |
 
-## 5. Operations
+## 5. Watch policy
+
+What the daemon considers automatically. These keys live in the user file only: they describe this machine, its filesystems and its sync clients, so a directory file may not set them, for the same reason it may not define a tool.
+
+```toml
+[watch]
+ignore = ['**/Library/Caches/**', '*.tmp']
+watch_hidden = false
+allow_synced = false
+max_source_size = '4GiB'
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `ignore` | array of globs | `[]` | Additional paths to ignore. Adds to the built-in list, never replaces it |
+| `watch_hidden` | bool | `false` | Consider dot-files and dot-directories |
+| `allow_synced` | bool | `false` | Convert inside placeholder-capable cloud providers instead of refusing with the provider named |
+| `max_source_size` | size | `4GiB` | Largest source for automatic conversion. `retype convert` ignores it |
+
+Three things are deliberately not configurable, so that nobody tunes them and then wonders why behaviour differs between machines:
+
+- The built-in ignore list, `docs/watch.md` §4. It is lifted only by registering a directory inside one of its entries, because naming a directory is intent
+- The batch size of 64 files per debounce window and the queue cap of 256, which are churn protection rather than policy, `docs/watch.md` §8
+- The debounce default of 500 ms, which a directory may override but a user may not, because pacing belongs to the directory being watched
+
+## 6. Operations
 
 ```toml
 [ops.quality]
@@ -165,7 +190,7 @@ args = ['-resize', '{value}']
 
 Formats, operations and presets enter one name space. Aliases are declared per operation.
 
-## 6. Presets
+## 7. Presets
 
 A preset is a named token sequence, optionally parameterised. It compiles to operations, so it composes with them and participates in the same conflict rules.
 
@@ -180,7 +205,7 @@ tokens = ['crop1x1', 'cap1024', 'quality80', 'nometa']
 
 `tokens` is parsed by the grammar parser with the same registry. Presets may reference other presets; cycles are load errors; `ask` and `now` are forbidden inside a preset.
 
-## 7. Assembly
+## 8. Assembly
 
 For an external backend, argv is the tool `layout` with substitutions:
 
@@ -200,7 +225,7 @@ prefer = ['native', 'magick', 'ffmpeg', 'pandoc', '7z']
 
 The first backend in `prefer` that implements every operation in the plan and is available wins. Determinism is required: a plan never depends on discovery order.
 
-## 8. Per-directory policy
+## 9. Per-directory policy
 
 `.retype.toml` in a watched directory may change behaviour but MUST NOT define tools, formats, operations or presets. A directory can arrive from an untrusted source, so it cannot introduce a command.
 
@@ -211,6 +236,7 @@ debounce_ms = 800
 deny = ['nometa']
 limits = { quality = 85 }
 confirm = false
+paused = false
 
 [conversions.to-jpg]
 enabled = false
@@ -221,7 +247,9 @@ preset = 'web-headshot'
 
 `deny` rejects an operation in that directory with `E_INAPPLICABLE`. `limits` clamps a parameter. `confirm = false` suppresses deferral for cheap jobs.
 
-## 9. Validation
+`paused = true` makes the directory unwatched by policy, and policy beats state: a later `retype watch --resume <dir>` is refused with `E_WATCH_PAUSED_BY_POLICY` naming the file, rather than being accepted and then quietly undone the next time the file is read.
+
+## 10. Validation
 
 Loading fails, naming the file and key, on any of:
 
@@ -236,14 +264,14 @@ Loading fails, naming the file and key, on any of:
 | V7 | A preset whose tokens do not parse, or a reference cycle |
 | V8 | An exclusive group with a single member, or a group declared but never used |
 | V9 | A format referenced by an operation but not declared |
-| V10 | A tier outside `exact`, `converted`, `delegated` |
+| V10 | A tier outside `exact`, `converted`, `delegated`, `docs/fidelity.md` |
 | V11 | `version_min` that does not parse as a version |
 | V12 | A `native` name not present in the compiled implementation list |
-| V13 | A per-directory file defining `tools`, `formats`, `ops` or `presets` |
+| V13 | A per-directory file defining `tools`, `formats`, `ops`, `presets`, or any key of the `[watch]` table |
 
 Warnings, not errors: a name that is a prefix of another name; a tool that fails its probe; a pair whose tier is `delegated` but has no `argv` fragment.
 
-## 10. Probing
+## 11. Probing
 
 Probing is an authoring aid, never a runtime decision.
 
@@ -254,6 +282,6 @@ retype doctor --emit      # a [tools] snippet reflecting what is installed
 
 `--emit` writes nothing unless asked to with `--write`. The emitted snippet is ordinary configuration and is validated like any other.
 
-## 11. Versioning
+## 12. Versioning
 
 Version identifier: `retype-config-1`, declared at file top level. The key is mandatory in user and directory files and implicit in `builtin.toml`. A file with an unknown major fails to load; a file with a lower major is upgraded through a declared migration when one exists. Keys are never reused for different meanings, and a renamed key stays accepted as an alias for at least one major version.

@@ -47,6 +47,7 @@ Everything else is namespaced:
 | `E_TOOL_` | `MISSING`, `VERSION`, `FAILED`, `TIMEOUT` |
 | `E_IO_` | `PERMISSION`, `SPACE`, `NOT_FOUND`, `EXISTS`, `LOCKED`, `CORRUPT_JOURNAL` |
 | `E_JOB_` | `STATE`, `CANCELLED`, `INTERRUPTED`, `PARTIAL`, `SUPERSEDED`, `RESUME_UNAVAILABLE` |
+| `E_WATCH_` | `PAUSED_BY_POLICY`: the directory file sets `paused = true` |
 | `E_IPC_` | As defined in `docs/ipc.md` |
 | `E_INTERNAL_` | `INVARIANT`, `PANIC`, `UNEXPECTED` |
 
