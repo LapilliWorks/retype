@@ -1,0 +1,19 @@
+[package]
+name = "retype-watch"
+description = "Filesystem event collection and rename correlation for retype"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+notify = "8"
+retype-core = { path = "../retype-core" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

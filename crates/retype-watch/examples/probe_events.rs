@@ -9,22 +9,15 @@
 //! file that was created in the same event batch would say nothing about how a
 //! real user's rename is seen: their file existed long before.
 //!
-//! Usage: `cargo run -p retype-core --example probe_events`
+//! Usage: `cargo run -p retype-watch --example probe_events`
 
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
-use notify::{RecursiveMode, Watcher};
-use retype_core::correlate::{Correlator, Identity, RenameFact, Sighting, coalesce, dedupe};
+use retype_core::correlate::{Correlator, RenameFact};
+use retype_watch::{Window, collect, feed_identity, feed_names, watch};
 
-const SETTLE: Duration = Duration::from_millis(400);
-const QUIET: Duration = Duration::from_millis(200);
-const LIMIT: Duration = Duration::from_secs(3);
-
-type RawEvent = (String, Vec<PathBuf>);
 type Step = Box<dyn Fn(&Path) -> Result<(), Box<dyn Error>>>;
 
 struct Scenario {
@@ -125,13 +118,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 	let root = dir.path().canonicalize()?;
 	fs::create_dir(root.join("sub"))?;
 
-	let (tx, rx) = mpsc::channel();
-	let mut watcher = notify::recommended_watcher(move |event| {
-		let _ = tx.send(event);
-	})?;
-	watcher.watch(&root, RecursiveMode::Recursive)?;
+	let (_watcher, receiver) = watch(&root)?;
+	let window = Window::default();
 
-	let mut pair = Correlator::new(4096);
+	let mut names = Correlator::new(4096);
 	let mut identity = Correlator::new(4096);
 
 	println!("# filesystem events");
@@ -143,22 +133,23 @@ fn main() -> Result<(), Box<dyn Error>> {
 		// Setup is fed silently, so the action starts from a primed correlator,
 		// which is what the daemon has after a file has existed for a while.
 		(scenario.setup)(&root)?;
-		let setup_events = drain(&rx, SETTLE);
-		feed(&mut pair, &mut identity, &setup_events);
+		let setup = collect(&receiver, window);
+		feed_names(&mut names, &setup);
+		feed_identity(&mut identity, &setup);
 
 		println!("## {}", scenario.name);
 		(scenario.act)(&root)?;
-		let events = drain(&rx, SETTLE);
+		let batch = collect(&receiver, window);
 
-		for (kind, paths) in &events {
-			println!("raw: {kind} {}", join(&root, paths));
+		for event in &batch.events {
+			println!("raw: {:?} {}", event.kind, join(&root, &event.paths));
+		}
+		for error in &batch.errors {
+			println!("raw: error: {error}");
 		}
 
-		let pair_facts = feed_pair(&mut pair, &events);
-		let identity_facts = feed_identity(&mut identity, &events);
-
-		report(&root, "pair", &pair_facts);
-		report(&root, "identity", &identity_facts);
+		report(&root, "pair", &feed_names(&mut names, &batch));
+		report(&root, "identity", &feed_identity(&mut identity, &batch));
 		println!();
 	}
 
@@ -170,98 +161,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 		);
 	}
 	Ok(())
-}
-
-fn feed(pair: &mut Correlator, identity: &mut Correlator, events: &[RawEvent]) {
-	feed_pair(pair, events);
-	feed_identity(identity, events);
-}
-
-/// Feed the name pairing strategy.
-///
-/// Platforms differ in how they describe a rename: Linux sends one event with
-/// both paths, Windows sends a `From` event and a `To` event, and macOS sends a
-/// `From` and a single-path `Any`. All three are handled here, which is the
-/// point of measuring rather than assuming.
-fn feed_pair(pair: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFact> {
-	let mut facts = Vec::new();
-
-	for (kind, paths) in events {
-		if paths.is_empty() {
-			continue;
-		}
-		if kind.contains("(Both)") && paths.len() >= 2 {
-			if let Some(fact) = pair.pair(&paths[0], &paths[1]) {
-				facts.push(fact);
-			}
-		} else if kind.contains("(From)") {
-			pair.rename_from(&paths[0]);
-		} else if kind.contains("(To)")
-			&& let Some(fact) = pair.rename_to(&paths[0])
-		{
-			facts.push(fact);
-		}
-	}
-
-	pair.end_batch();
-	coalesce(dedupe(facts))
-}
-
-/// Feed a debounced batch to the identity correlator.
-///
-/// Order matters: appearances are observed before disappearances, because a
-/// rename reports the old path as gone. Feeding the old path first would
-/// discard the identity before the new path claimed it, which would defeat
-/// identity correlation exactly where it is needed, on platforms that do not
-/// report both names.
-fn feed_identity(identity: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFact> {
-	let mut paths: Vec<PathBuf> = Vec::new();
-	for (_, event_paths) in events {
-		for path in event_paths {
-			if !paths.contains(path) {
-				paths.push(path.clone());
-			}
-		}
-	}
-
-	let mut facts = Vec::new();
-	for path in &paths {
-		if let Some(id) = identity_of(path) {
-			let links = fs::symlink_metadata(path).map(|meta| links(&meta)).unwrap_or(1);
-			if let Some(fact) = identity.observe(Sighting {
-				path: path.clone(),
-				identity: id,
-				links,
-			}) {
-				facts.push(fact);
-			}
-		}
-	}
-	for path in &paths {
-		if identity_of(path).is_none() {
-			identity.forget(path);
-		}
-	}
-	facts
-}
-
-fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>, settle: Duration) -> Vec<RawEvent> {
-	let mut events = Vec::new();
-	let start = Instant::now();
-	let mut deadline = start + settle;
-
-	while Instant::now() < deadline && start.elapsed() < LIMIT {
-		match rx.recv_timeout(QUIET) {
-			Ok(Ok(event)) => {
-				events.push((format!("{:?}", event.kind), event.paths));
-				deadline = Instant::now() + QUIET;
-			}
-			Ok(Err(error)) => events.push((format!("error: {error}"), Vec::new())),
-			Err(mpsc::RecvTimeoutError::Timeout) => {}
-			Err(mpsc::RecvTimeoutError::Disconnected) => break,
-		}
-	}
-	events
 }
 
 fn report(root: &Path, strategy: &str, facts: &[RenameFact]) {
@@ -290,30 +189,4 @@ fn join(root: &Path, paths: &[PathBuf]) -> String {
 
 fn relative(root: &Path, path: &Path) -> String {
 	path.strip_prefix(root).unwrap_or(path).display().to_string()
-}
-
-#[cfg(unix)]
-fn identity_of(path: &Path) -> Option<Identity> {
-	use std::os::unix::fs::MetadataExt;
-	let meta = fs::symlink_metadata(path).ok()?;
-	Some(Identity {
-		device: meta.dev(),
-		inode: meta.ino(),
-	})
-}
-
-#[cfg(not(unix))]
-fn identity_of(_path: &Path) -> Option<Identity> {
-	None
-}
-
-#[cfg(unix)]
-fn links(meta: &fs::Metadata) -> u64 {
-	use std::os::unix::fs::MetadataExt;
-	meta.nlink()
-}
-
-#[cfg(not(unix))]
-fn links(_meta: &fs::Metadata) -> u64 {
-	1
 }

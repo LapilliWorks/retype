@@ -314,9 +314,17 @@ dependencies = [
 name = "retype-core"
 version = "0.1.0"
 dependencies = [
- "notify",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "retype-watch"
+version = "0.1.0"
+dependencies = [
+ "notify",
+ "retype-core",
+ "tempfile",
 ]
 
 [[package]]
