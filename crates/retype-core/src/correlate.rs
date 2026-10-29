@@ -54,7 +54,15 @@ pub struct Correlator {
 	by_identity: HashMap<Identity, PathBuf>,
 	by_path: HashMap<PathBuf, Identity>,
 	order: VecDeque<PathBuf>,
+	/// Sources reported by an event source that splits a rename into two
+	/// events, waiting for their target. Bounded, and cleared at the end of a
+	/// batch.
+	pending: VecDeque<PathBuf>,
+	pending_capacity: usize,
 }
+
+/// Maximum unmatched rename sources kept between events.
+const PENDING_CAPACITY: usize = 128;
 
 impl Correlator {
 	pub fn new(capacity: usize) -> Self {
@@ -63,6 +71,8 @@ impl Correlator {
 			by_identity: HashMap::new(),
 			by_path: HashMap::new(),
 			order: VecDeque::new(),
+			pending: VecDeque::new(),
+			pending_capacity: PENDING_CAPACITY,
 		}
 	}
 
@@ -90,6 +100,35 @@ impl Correlator {
 
 		self.remember(sighting.path, sighting.identity);
 		fact
+	}
+
+	/// Record a source from an event source that reports a rename as two
+	/// events, as Windows does. The fact is produced when `rename_to` arrives.
+	pub fn rename_from(&mut self, source: &Path) {
+		if self.pending.len() == self.pending_capacity {
+			self.pending.pop_front();
+		}
+		self.pending.push_back(source.to_path_buf());
+	}
+
+	/// Match a target against a pending source in the same directory.
+	///
+	/// Windows reports `From` then `To` for each file, and a batch of renames
+	/// can interleave, so matching is by directory and oldest first rather than
+	/// by adjacency.
+	pub fn rename_to(&mut self, target: &Path) -> Option<RenameFact> {
+		let index = self
+			.pending
+			.iter()
+			.position(|source| source.parent() == target.parent())?;
+		let source = self.pending.remove(index)?;
+		self.pair(&source, target)
+	}
+
+	/// Drop sources that never found a target. Called at the end of a batch:
+	/// an unmatched `From` is a file that left the watched tree, not a rename.
+	pub fn end_batch(&mut self) {
+		self.pending.clear();
 	}
 
 	/// Report a rename when the event source supplies both names.
@@ -274,6 +313,59 @@ mod tests {
 
 		assert_eq!(rename.intent, "mp4+mute");
 		assert_eq!(rename.source_ext, "mov");
+	}
+
+	#[test]
+	fn split_rename_events_are_paired() {
+		let mut correlator = Correlator::new(16);
+		correlator.rename_from(Path::new("/dir/a.heic"));
+		let rename = correlator.rename_to(Path::new("/dir/a.jpg")).unwrap();
+
+		assert_eq!(rename.source, PathBuf::from("/dir/a.heic"));
+		assert_eq!(rename.intent, "jpg");
+	}
+
+	#[test]
+	fn interleaved_split_events_are_paired_without_adjacency() {
+		let mut correlator = Correlator::new(16);
+		// As a batch may interleave: all sources first, then all targets.
+		for name in ["a.heic", "b.heic", "c.heic"] {
+			correlator.rename_from(Path::new("/dir/").join(name).as_path());
+		}
+
+		let first = correlator.rename_to(Path::new("/dir/a.jpg")).unwrap();
+		let second = correlator.rename_to(Path::new("/dir/b.webp")).unwrap();
+
+		assert_eq!(first.source, PathBuf::from("/dir/a.heic"));
+		assert_eq!(second.source, PathBuf::from("/dir/b.heic"));
+		assert_eq!(second.intent, "webp");
+	}
+
+	#[test]
+	fn split_rename_in_another_directory_is_a_move() {
+		let mut correlator = Correlator::new(16);
+		correlator.rename_from(Path::new("/dir/a.heic"));
+		assert!(correlator.rename_to(Path::new("/dir/sub/a.jpg")).is_none());
+	}
+
+	#[test]
+	fn unmatched_source_is_dropped_at_batch_end() {
+		let mut correlator = Correlator::new(16);
+		correlator.rename_from(Path::new("/dir/a.heic"));
+		correlator.end_batch();
+		assert!(correlator.rename_to(Path::new("/dir/b.jpg")).is_none());
+	}
+
+	#[test]
+	fn pending_sources_are_bounded() {
+		let mut correlator = Correlator::new(16);
+		correlator.pending_capacity = 2;
+		for name in ["a", "b", "c"] {
+			correlator.rename_from(Path::new(&format!("/dir/{name}.heic")));
+		}
+		// The oldest was evicted, so only `b` and `c` can match.
+		assert!(correlator.rename_to(Path::new("/dir/a.jpg")).is_none());
+		assert!(correlator.rename_to(Path::new("/dir/c.jpg")).is_some());
 	}
 
 	#[test]

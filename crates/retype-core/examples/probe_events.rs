@@ -151,15 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 			println!("raw: {kind} {}", join(&root, paths));
 		}
 
-		let mut pair_facts = Vec::new();
-		for (_, paths) in &events {
-			if paths.len() >= 2
-				&& let Some(fact) = pair.pair(&paths[0], &paths[1])
-			{
-				pair_facts.push(fact);
-			}
-		}
-
+		let pair_facts = feed_pair(&mut pair, &events);
 		let identity_facts = feed_identity(&mut identity, &events);
 
 		report(&root, "pair", &pair_facts);
@@ -178,12 +170,38 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn feed(pair: &mut Correlator, identity: &mut Correlator, events: &[RawEvent]) {
+	feed_pair(pair, events);
 	feed_identity(identity, events);
-	for (_, paths) in events {
-		if paths.len() >= 2 {
-			pair.pair(&paths[0], &paths[1]);
+}
+
+/// Feed the name pairing strategy.
+///
+/// Platforms differ in how they describe a rename: Linux sends one event with
+/// both paths, Windows sends a `From` event and a `To` event, and macOS sends a
+/// `From` and a single-path `Any`. All three are handled here, which is the
+/// point of measuring rather than assuming.
+fn feed_pair(pair: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFact> {
+	let mut facts = Vec::new();
+
+	for (kind, paths) in events {
+		if paths.is_empty() {
+			continue;
+		}
+		if kind.contains("(Both)") && paths.len() >= 2 {
+			if let Some(fact) = pair.pair(&paths[0], &paths[1]) {
+				facts.push(fact);
+			}
+		} else if kind.contains("(From)") {
+			pair.rename_from(&paths[0]);
+		} else if kind.contains("(To)")
+			&& let Some(fact) = pair.rename_to(&paths[0])
+		{
+			facts.push(fact);
 		}
 	}
+
+	pair.end_batch();
+	dedupe(facts)
 }
 
 /// Feed a debounced batch to the identity correlator.
@@ -222,6 +240,22 @@ fn feed_identity(identity: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFa
 		}
 	}
 	facts
+}
+
+/// Linux reports the same rename three times, as `From`, `To` and `Both`, so a
+/// batch can produce the same fact more than once. The daemon has to dedupe per
+/// batch for the same reason.
+fn dedupe(facts: Vec<RenameFact>) -> Vec<RenameFact> {
+	let mut unique: Vec<RenameFact> = Vec::new();
+	for fact in facts {
+		if !unique
+			.iter()
+			.any(|seen| seen.source == fact.source && seen.target == fact.target)
+		{
+			unique.push(fact);
+		}
+	}
+	unique
 }
 
 fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>, settle: Duration) -> Vec<RawEvent> {

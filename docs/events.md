@@ -47,7 +47,11 @@ Alongside them, ordinary noise: `Create(File)`, `Access(Open(Any))`, `Modify(Dat
 - **Batches are fine**: twenty renames in one gesture yield twenty facts, no loss, which the previous debouncer-based design could not promise
 - **Data events must be filtered**: a write after a rename arrives as an ordinary modify, and it is not a second trigger
 
-### 1.4 Feed order
+### 1.4 Duplicates
+
+Linux reports one rename as `From`, `To` and `Both`, so a batch yields the same fact up to three times. The feeder dedupes by source and target within a batch, and the daemon has to do the same.
+
+### 1.5 Feed order
 
 Discovered by the probe, and the reason it is written down: the identity strategy silently produced nothing until the feed order was fixed.
 
@@ -58,17 +62,61 @@ Within one debounced batch, appearances must be observed **before** disappearanc
 
 Getting this backwards is invisible on Linux, because inotify also reports both names, and fatal on any platform that does not.
 
-## 2. macOS (FSEvents)
+## 2. Windows (ReadDirectoryChangesW, notify 8)
+
+Measured 2026-10-29, transcript `probe-windows.txt`. Raw events are facts from that run; the pairing column of that transcript predates cross-event pairing and is superseded by §2.4.
+
+### 2.1 Raw events
+
+```
+Modify(Name(From))   a.heic
+Modify(Name(To))     a.jpg
+```
+
+No `Both` event exists on this platform. A rename is always two events, each carrying one path, and the two are adjacent when a batch is small.
+
+### 2.2 Scenario results
+
+| Scenario | Raw events | Consequence |
+|---|---|---|
+| Rename in place | `From`, `To` | Detectable by pairing two events |
+| Rename case only | `Remove(Any)`, `From`, `To` | Extra removal event to ignore |
+| Rename stem and extension | `From`, `To` | Rejected by the stem rule |
+| **Rename across directories** | `Remove(Any)`, `Create(Any)`, `Modify(Any)` on the parent | **Not a rename at all**: a move is reported as delete plus create |
+| Two renames in one window | Four events, two `From` and two `To` | Two facts, no loss |
+| Rename over an existing file | `Remove(Any)` for the victim, then `From`, `To` | The removal is a separate file's disappearance |
+| Twenty renames in one gesture | Forty events, strictly interleaved `From`, `To` per file | No loss, and order is preserved |
+| Rename then write | `From`, `To`, then two `Modify(Any)` | Data events must not be read as renames |
+| Rename then delete | `From`, `To`, `Remove(Any)` | Nothing should be dispatched |
+
+### 2.3 What this establishes
+
+- **Pairing must work across events, not within one.** A feeder that only looks at events carrying two paths finds nothing on Windows, which is what the first transcript shows. `Correlator::rename_from` and `rename_to` exist for this
+- **Interleaving is real and ordered.** Twenty renames produce alternating `From` and `To` pairs, so a single pending slot would be sufficient here, but matching by directory and oldest-first survives either interleaving
+- **Moves are not renames on Windows**, which satisfies for free and means a cross-directory rename with an intent is silently ignored rather than misread. Worth stating in the documentation, because a user will eventually expect the opposite
+- **Victims of a rename produce removals.** Replacing an existing file emits `Remove` for it before the rename pair, so removal events must not be treated as failures or as triggers
+- **File identity is still unavailable.** `std` does not expose a file id on Windows, so the identity column of the transcript is empty by construction. Pairing is sufficient on this platform today, but identity is the robustness path if a pair is ever lost, and needs `GetFileInformationByHandle`
+
+### 2.4 Re-run needed
+
+The transcript's pairing column was produced before cross-event pairing existed. Re-running the probe on Windows should show facts for every scenario in the table above except the case-only, stem-change and cross-directory rows. CI uploads the transcript, so the next run replaces this note.
+
+## 3. macOS (FSEvents)
 
 Not yet measured. Run the probe on macOS and replace this section. The expectation from the backend source is a `From` event and single-path `Any` events, with no `Both`, which would make identity correlation the primary mechanism rather than a redundancy.
-
-## 3. Windows (ReadDirectoryChangesW)
-
-Not yet measured. Run the probe on Windows and replace this section. Two known gaps before that run:
-
-- `std` does not expose a file id on Windows, so the probe reports identity as unavailable. Measurement needs the file id through `GetFileInformationByHandle`, which is experiment 4 on the plan's list
-- The backend reports `From` then `To`, so the pair strategy is expected to work; the question is whether it ever reports more than one pending rename, which is where the debouncer used to lose pairs
 
 ## 4. BSD (kqueue)
 
 Not yet measured, and not before the port. The backend reports a single-path `Any` event, which makes identity correlation load bearing, as on macOS.
+
+## 5. Cross-platform summary
+
+| | Linux | Windows | macOS | BSD |
+|---|---|---|---|---|
+| Rename as one event with both paths | yes (`Both`) | no | no (expected) | no (expected) |
+| Rename as separate `From` and `To` | yes, in addition | yes | `From` plus `Any` | `Any` only |
+| Cross-directory move reported as rename | yes | no | unknown | unknown |
+| File identity available | yes | needs Win32 | yes | yes |
+| Primary strategy | identity, pairing as backup | pairing, identity as backup | identity (expected) | identity (expected) |
+
+The lesson from two platforms: no single event shape covers both, so the correlator must accept both a two-path event and a pair of events, and the daemon must feed whichever its platform produces. `docs/watch.md` §7 records the resulting obligations.
