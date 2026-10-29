@@ -1,0 +1,94 @@
+# Watch scope
+
+What the daemon watches, what it ignores, and what it does at startup.
+
+## 1. Registrations
+
+| Property | Value |
+|---|---|
+| Unit | A directory, registered by absolute path |
+| Canonicalisation | Symlinks resolved; the canonical path is the identity of the registration |
+| Recursion | Always recursive. There is no depth limit and no non-recursive mode |
+| Nesting | Allowed. A registration inside another is recorded, and its own `.retype.toml` applies to its subtree |
+| Persistence | `watches.toml` in the state directory, re-read on daemon start |
+| Missing path | A registration whose path is gone stays registered, is marked unavailable in `daemon status`, and is retried every 30 s |
+| Count | Bounded by configuration, default 32. Noise beyond that is a misconfiguration, not a use case |
+
+## 2. Directory configuration lookup
+
+`.retype.toml` is resolved by **nearest ancestor**, starting at the file's own directory and walking up no further than the registration root. Results are cached per directory, and the cache is invalidated by the configuration watcher rather than by re-scanning.
+
+A file outside every registration root is never converted, so it has no directory configuration.
+
+## 3. Startup
+
+- **Nothing is converted retroactively.** Registering a directory does not convert files that are already there, even if their names carry intent syntax. That would be surprising, and on first registration it would be destructive
+- **Identity priming does happen.** The daemon stats every file under the root and records device and inode, because without priming, renaming a file that existed before the daemon started has no identity to correlate and would be silently ignored. Priming reads no file contents and writes nothing
+- Priming is incremental and cancellable: it walks in the background, reports progress in `daemon status`, and stops immediately if the registration is removed. A root of a million files delays correlation of unprimed files, it does not delay startup
+- A file whose identity is unprimed at rename time is still handled: the `From` and `To` event pair covers it, and if that is unavailable the result is `NeedsAttention`, never silence
+
+## 4. Ignores
+
+Evaluated in order, first match wins.
+
+| Rule | Default |
+|---|---|
+| Temp files of the tool itself | Always ignored: the `.retype-in.` and `.retype-out.` prefixes |
+| Directories in the ignore list | `.git`, `.hg`, `.svn`, `node_modules`, `target`, `.venv`, `__pycache__`, `System Volume Information`, `$RECYCLE.BIN`, `.Trash`, `.Trashes` |
+| Hidden directories | Ignored unless `watch_hidden = true` |
+| User globs | `ignore = ['**/Library/Caches/**', '*.tmp']` in the user configuration |
+| Directory patterns | `patterns = ['*.jpg']` in `.retype.toml`, which restricts what is considered at all |
+
+Ignoring a directory prunes the whole subtree, including identity priming. Ignoring a file pattern only skips conversion; the file is still primed.
+
+A directory whose name does not match user globs is not skipped, only the paths that match.
+
+## 5. Synced folders
+
+A cloud provider that can leave a file as a placeholder is a network filesystem with a proprietary protocol. The file looks local, its contents are elsewhere, and reading it triggers a download. That is the deferred network stage, so it is refused rather than half-supported.
+
+Registration is refused with `E_USAGE_ARGS` when the path is inside a known placeholder-capable provider:
+
+| Platform | Detected roots |
+|---|---|
+| macOS | `~/Library/CloudStorage/**`, dataless files (`SF_DATALESS`) under a registration |
+| Windows | `%USERPROFILE%\OneDrive*`, `\Cloud\` mirrors, `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` on a registered file |
+| Linux | `gvfs` and FUSE mounts that report `EAGAIN` on read |
+
+The refusal names the provider and says that support is planned as a separate stage. `allow_synced = true` in the user configuration overrides it for people who have checked that their provider keeps full local copies.
+
+Ordinary sync clients are unaffected, because there is nothing to detect: Dropbox with files available offline, Syncthing, rsync targets and git worktrees are ordinary local directories, and refusing them would be both wrong and infuriating. The rule is about placeholders, not about the word "sync".
+
+Dataless and recall-on-access files encountered inside an ordinary registration are skipped, logged once at info level, and counted in `daemon status`. They are never converted implicitly.
+
+## 6. Size limits
+
+| Limit | Default | Behaviour over the limit |
+|---|---|---|
+| Source size for automatic conversion | 4 GiB | Skipped, logged, counted. `retype convert` is unaffected |
+| Batch size per debounce window | 64 files | Queue admission is delayed until the next window |
+
+The size limit exists because a rename is a fast gesture and a 40 GiB video is not. Automatic conversion of something that large needs to be asked for, which is what `retype convert` is for.
+
+## 7. Event handling
+
+| Concern | Rule |
+|---|---|
+| Debounce | Per path, default 500 ms, overridable by `.retype.toml` `debounce_ms` |
+| Scope | In-place renames only, per |
+| Batching | Renames arriving within one window are collected into one job batch and one notification |
+| Ordering | Queue order follows the earliest event in the batch, not arrival order of the last |
+| Self-inflicted events | Recognised by temp prefix and by identity, and never treated as user intent |
+
+## 8. Churn protection
+
+A directory can produce more rename events than any queue should absorb, for example a build system writing through a watched tree. Rules:
+
+- Above 256 queued jobs, new automatic jobs are dropped with a warning and a counter, and the notification says conversion is paused rather than pretending it succeeded
+- `pause` and `resume` exist as `retype watch --pause <dir>` and `--resume <dir>`, and as a switch in the directory file (`paused = true`) so a project can ship the setting
+
+## 9. Network filesystems
+
+Out of scope, per the Deferred table. The daemon detects an obvious network mount at registration, warns once, and does not refuse the registration, because a warning that turns out to be wrong is better than a refusal that blocks a legitimate setup.
+
+Event delivery on network mounts is unreliable in both directions, and identity is often synthetic. A user who registers a network path is choosing to rely on the `From` and `To` pair.

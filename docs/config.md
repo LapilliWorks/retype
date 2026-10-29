@@ -1,0 +1,259 @@
+# Configuration schema
+
+Declarative configuration for tools, formats, operations, presets and policy.
+
+## 1. Principle
+
+Schema version: `retype-config-1`. Every configuration file begins with `version = 'retype-config-1'`; a file declaring a different major fails to load with an explanation.
+
+One schema, two sources, one validator.
+
+- `builtin.toml` ships inside the binary and defines every tool, format, operation and preset the product claims
+- `retype.toml` in the user config directory overrides and extends it by name
+- `.retype.toml` in a watched directory carries policy only
+
+Both files are parsed by the same loader and validated by the same rules. Nothing is declared twice, and no operation, format or preset is hardcoded in Rust except the native backends, which are named and verified against a compiled list.
+
+Configuration is declarative throughout. There is no shell evaluation, no conditionals, no string interpolation beyond a closed placeholder set.
+
+## 2. Precedence
+
+Highest wins:
+
+| Order | Source | May define |
+|---|---|---|
+| 1 | Command line flags | Anything a single invocation needs |
+| 2 | Environment variables | Paths and switches only, see below |
+| 3 | Directory file `.retype.toml` | Policy only, and only narrowing |
+| 4 | User file `retype.toml` | Everything |
+| 5 | `builtin.toml` | Everything the product ships |
+
+Environment variables, all optional:
+
+| Variable | Effect |
+|---|---|
+| `RETYPE_STATE_DIR` | State directory, overriding platform defaults |
+| `RETYPE_CONFIG` | User configuration path, instead of the platform default |
+| `RETYPE_NO_AUTOSTART` | Clients never start the daemon |
+| `RETYPE_LOG` | Log filter, same syntax as the `--verbose` counters |
+| `NO_COLOR`, `CLICOLOR` | Colour handling, per their respective conventions |
+
+Merge rules per key type:
+
+| Type | Rule |
+|---|---|
+| Table | Merged key by key, recursively |
+| Array | Replaced whole, never concatenated |
+| Scalar | Replaced |
+| Entry with `enabled = false` | Removed from the merged result |
+
+So a user who redefines one operation's `argv` keeps that operation's slot, parameter class and format applicability, because those keys are not present in the override. To change them is to define a different operation under a name that is already taken, which is rejected as `E_CFG_VALIDATION`.
+
+Shadowing:
+
+| Case | Allowed | Effect |
+|---|---|---|
+| User overrides a built-in operation's `argv` | Yes | The operation behaves differently, the grammar does not change |
+| User overrides a built-in operation's `slot`, `param` or `formats` | No | `E_CFG_VALIDATION` |
+| User defines an operation with a built-in name | No | `E_CFG_NAME_CLASH` |
+| User preset with a built-in preset name | Yes, with a warning | The user pipeline replaces the shipped one |
+| User preset with an operation name | No | `E_CFG_NAME_CLASH` |
+| Directory file defining anything but policy | No | `E_CFG_VALIDATION` |
+
+The distinction exists because the grammar is a published contract. A configuration file may change how an operation is executed, and may add new names to the vocabulary, but may not silently change what a shipped name means. Otherwise two machines running `retype-grammar-1` would disagree about the same intent string.
+
+Directory files narrow and never widen: `deny` can forbid an operation, `limits` can clamp a parameter, `patterns` can restrict which files are considered. There is no key that adds a capability.
+
+## 3. Tools
+
+```toml
+version = 'retype-config-1'
+
+[tools.magick]
+command = 'magick'                     # absolute path, or a bare name resolved on PATH
+probe = ['-version']                   # argv, first line reports the version
+version_min = '7.1'
+layout = ['convert', '{input}', '{ops}', '{output}']
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `command` | yes | Executable, absolute or bare name. No shell metacharacters, no spaces |
+| `probe` | no | Argv run by `retype doctor` to report a version |
+| `version_min` | no | Minimum accepted version, compared against the probe output |
+| `layout` | yes | Argv template. Contains `{input}`, `{ops}`, `{output}` |
+| `engines` | no | Named alternatives resolved at plan time, see 3.1 |
+
+### 3.1 Engines
+
+Some tools delegate the hard part to an external engine, and which engine is present changes the output. An engine is a named list of candidate commands, resolved first-present:
+
+```toml
+[tools.pandoc]
+command = 'pandoc'
+layout = ['{input}', '{ops}', '-o', '{output}']
+engines = { pdf = ['typst', 'xelatex', 'weasyprint', 'wkhtmltopdf'] }
+
+[formats.pdf.argv.pandoc]
+args = ['--pdf-engine', '{engine.pdf}']
+```
+
+Rules:
+
+- `{engine.<name>}` may appear only in an `argv` fragment, and only if `engines.<name>` is declared
+- Resolution picks the first candidate that exists on `PATH` and answers its probe, if a probe is declared for it
+- When no candidate exists, the plan fails with `E_TOOL_MISSING`, naming every candidate so the message tells the user what to install
+- The resolved candidate is recorded with the job and reported by `retype why`, because the same intent with a different engine is a different result
+- An `argv` fragment may also name an engine literally, for example `args = ['--pdf-engine=xelatex']`. That pins the engine, bypasses resolution, and fails as `E_TOOL_MISSING` if the named engine is absent
+
+## 4. Formats
+
+```toml
+[formats.jpg]
+family = 'image'
+lossy = true
+alpha = false
+tier = 'converted'
+aliases = ['jpeg']
+
+[formats.jpg.argv.magick]
+args = ['-quality', '92']
+
+[formats.mp4.argv.ffmpeg]
+args = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+```
+
+| Key | Meaning |
+|---|---|
+| `family` | `image`, `audio`, `video`, `document`, `archive`, `folder` |
+| `lossy` | Whether the format is lossy |
+| `alpha` | Whether the format carries alpha |
+| `tier` | Default fidelity tier for pairs targeting this format |
+| `aliases` | Alternate extension spellings, resolved by the grammar |
+| `argv.<tool>` | Fragment contributed by the format to that tool's `{ops}` |
+
+## 5. Operations
+
+```toml
+[ops.quality]
+slot = 'encoder'
+exclusive = ['encode-target']
+param = { class = 'int', min = 1, max = 100 }
+formats = ['jpg', 'webp', 'avif', 'heic']
+
+[ops.quality.argv.magick]
+args = ['-quality', '{value}']
+
+[ops.resize]
+slot = 'geometry'
+exclusive = ['scale']
+param = { class = 'dim', min = 1, max = 16384 }
+formats = ['*']
+
+[ops.resize.argv.magick]
+args = ['-resize', '{value}']
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `slot` | yes | Ordering category, `temporal`, `geometry`, `colour`, `audio`, `encoder`, `metadata`, `control` |
+| `exclusive` | no | Group names; two members of one group conflict |
+| `param` | when it takes a value | `class`, plus `min`, `max`, `values` for `enum` |
+| `formats` | yes | Formats the operation applies to, or `['*']` |
+| `argv.<tool>` | unless `native` | Fragment contributed to that tool's `{ops}` |
+| `native` | unless `argv` | Name of a compiled implementation |
+
+Formats, operations and presets enter one name space. Aliases are declared per operation.
+
+## 6. Presets
+
+A preset is a named token sequence, optionally parameterised. It compiles to operations, so it composes with them and participates in the same conflict rules.
+
+```toml
+[presets.thumb]
+param = { class = 'int', min = 16, max = 4096 }
+tokens = ['resize={value}x0', 'quality75']
+
+[presets.web-headshot]
+tokens = ['crop1x1', 'cap1024', 'quality80', 'nometa']
+```
+
+`tokens` is parsed by the grammar parser with the same registry. Presets may reference other presets; cycles are load errors; `ask` and `now` are forbidden inside a preset.
+
+## 7. Assembly
+
+For an external backend, argv is the tool `layout` with substitutions:
+
+- `{input}` and `{output}` are paths
+- `{ops}` expands to the concatenation of the format fragments in declaration order, then the operation fragments in canonical slot order
+
+No splicing happens inside an argument; a placeholder occupying a whole argument is replaced by a list, a placeholder inside an argument is replaced by a string. Both forms are permitted and distinct.
+
+For a native backend there is no argv: operations compile to a typed plan.
+
+Backend selection:
+
+```toml
+[backends]
+prefer = ['native', 'magick', 'ffmpeg', 'pandoc', '7z']
+```
+
+The first backend in `prefer` that implements every operation in the plan and is available wins. Determinism is required: a plan never depends on discovery order.
+
+## 8. Per-directory policy
+
+`.retype.toml` in a watched directory may change behaviour but MUST NOT define tools, formats, operations or presets. A directory can arrive from an untrusted source, so it cannot introduce a command.
+
+```toml
+version = 'retype-config-1'
+patterns = ['*.jpg', '*.png']
+debounce_ms = 800
+deny = ['nometa']
+limits = { quality = 85 }
+confirm = false
+
+[conversions.to-jpg]
+enabled = false
+
+[conversions.heic-to-jpg]
+preset = 'web-headshot'
+```
+
+`deny` rejects an operation in that directory with `E_INAPPLICABLE`. `limits` clamps a parameter. `confirm = false` suppresses deferral for cheap jobs.
+
+## 9. Validation
+
+Loading fails, naming the file and key, on any of:
+
+| Rule | Condition |
+|---|---|
+| V1 | A placeholder outside `{input}`, `{ops}`, `{output}`, `{value}`, `{engine.<name>}`, or in the wrong position |
+| V2 | A `layout` without exactly one `{ops}` |
+| V3 | `{value}` in an entity that declares no `param`, or a declared `param` never used |
+| V4 | `{engine.<name>}` without a matching `engines` list, or an `engines` list that nothing uses |
+| V5 | A command containing a shell metacharacter or a space |
+| V6 | A name used twice, or a preset name equal to an operation name or alias |
+| V7 | A preset whose tokens do not parse, or a reference cycle |
+| V8 | An exclusive group with a single member, or a group declared but never used |
+| V9 | A format referenced by an operation but not declared |
+| V10 | A tier outside `exact`, `converted`, `delegated` |
+| V11 | `version_min` that does not parse as a version |
+| V12 | A `native` name not present in the compiled implementation list |
+| V13 | A per-directory file defining `tools`, `formats`, `ops` or `presets` |
+
+Warnings, not errors: a name that is a prefix of another name; a tool that fails its probe; a pair whose tier is `delegated` but has no `argv` fragment.
+
+## 10. Probing
+
+Probing is an authoring aid, never a runtime decision.
+
+```
+retype doctor             # tools, versions, unavailable pairs, prefix warnings
+retype doctor --emit      # a [tools] snippet reflecting what is installed
+```
+
+`--emit` writes nothing unless asked to with `--write`. The emitted snippet is ordinary configuration and is validated like any other.
+
+## 11. Versioning
+
+Version identifier: `retype-config-1`, declared at file top level. The key is mandatory in user and directory files and implicit in `builtin.toml`. A file with an unknown major fails to load; a file with a lower major is upgraded through a declared migration when one exists. Keys are never reused for different meanings, and a renamed key stays accepted as an alias for at least one major version.
