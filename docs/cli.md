@@ -18,7 +18,7 @@ retype <command> [arguments] [flags]
 | `undo <id\|--last>` | Reverse one job |
 | `why <path>` | Explain a file's conversion |
 | `explain <intent>` | Parse, plan, backend, estimate and diagnostics without a file |
-| `list [--tiers]` | Supported pairs, generated from configuration |
+| `list [--tiers]` | Configured pairs. `--tiers` adds one line per claim with its engine and version, `docs/fidelity.md` |
 | `doctor [--emit\|--write\|--report]` | Tool probing, availability, support bundle |
 | `bench` | Calibrate the estimator |
 | `init [--output <path>]` | Write the example configuration |
