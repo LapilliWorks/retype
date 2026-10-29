@@ -80,7 +80,7 @@ Rules:
 - Resume skips outputs whose recorded identity still matches a file on disk, and re-runs the rest. `--force` re-runs everything
 - Resume needs the source bytes, which come from the path itself while it still holds them, otherwise from the undo record. When neither is available the answer is `E_JOB_RESUME_UNAVAILABLE`, and the message says which two things are missing
 
-The product's invariant is about paths, not jobs: a path never carries a format it does not contain. Partial completion respects it, because each output is written to a temp file and renamed only when complete. The single case that could break it is a job in which no output succeeded, because then the renamed source still holds the original format. That case restores the source extension and fails the job, so the invariant holds in every branch.
+The product's invariant is about paths, not jobs: a path never carries a format it does not contain. It holds at every instant, not only after commit: the source is renamed back to its own extension before a conversion starts (`docs/state.md` §5.4), and each output is written to a temporary file and renamed only when complete. The single case that could break it is a job in which no output succeeded, because then the renamed source still holds the original format. That case restores the source extension and fails the job, so the invariant holds in every branch.
 
 ## 6. Diagnostics
 

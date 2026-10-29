@@ -16,8 +16,11 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::ext::split_extension;
 
-/// Prefix for temporary files. Never a valid intent, and never a user name.
+/// Prefix for temporary output files. Never a valid intent, never a user name.
 pub const TEMP_PREFIX: &str = ".retype-tmp.";
+
+/// Prefix for a temporary input name, used only when the source name is taken.
+pub const TEMP_IN_PREFIX: &str = ".retype-in.";
 
 /// Whether a path is one of our temporary files.
 pub fn is_temp_file(path: &Path) -> bool {
@@ -78,6 +81,82 @@ impl Drop for StagedOutput {
 			let _ = fs::remove_file(&self.temp);
 		}
 	}
+}
+
+/// Where a converter should read from, and where the result belongs.
+///
+/// A rename leaves the source bytes at the new name, so a converter that reads
+/// the file directly would see the wrong extension. Rather than lie about the
+/// content for the duration of the conversion, the file is renamed back to its
+/// source name first: the name matches the bytes at every instant, a crash
+/// leaves a correctly named file, and filesystems without hard links need no
+/// copy.
+///
+/// The temporary link exists only for the case where the source name is taken
+/// by something else and the file therefore cannot be renamed back.
+#[derive(Debug)]
+pub enum PreparedInput {
+	/// The file is at its source name. The converter reads it there.
+	Restored { input: PathBuf, target: PathBuf },
+	/// The file could not be renamed back, so its bytes are reachable through
+	/// a temporary link, or a copy where links are unsupported.
+	Linked { input: PathBuf, target: PathBuf },
+}
+
+impl PreparedInput {
+	pub fn input(&self) -> &Path {
+		match self {
+			Self::Restored { input, .. } | Self::Linked { input, .. } => input,
+		}
+	}
+
+	pub fn target(&self) -> &Path {
+		match self {
+			Self::Restored { target, .. } | Self::Linked { target, .. } => target,
+		}
+	}
+
+	/// Whether the input is a temporary name that must be removed afterwards.
+	pub fn is_temporary(&self) -> bool {
+		matches!(self, Self::Linked { .. })
+	}
+}
+
+impl Drop for PreparedInput {
+	fn drop(&mut self) {
+		if let Self::Linked { input, .. } = self {
+			let _ = fs::remove_file(input);
+		}
+	}
+}
+
+/// Prepare the input for a conversion whose target already holds the source
+/// bytes, which is what a rename produces.
+pub fn prepare_input(target: &Path, source_ext: &str) -> Result<PreparedInput> {
+	match restore_source_name(target, source_ext) {
+		Ok(restored) => Ok(PreparedInput::Restored {
+			input: restored,
+			target: target.to_path_buf(),
+		}),
+		Err(Error::Exists(_)) => {
+			let input = temporary_input_path(target, source_ext)?;
+			if fs::hard_link(target, &input).is_err() {
+				// Filesystems without hard links, such as exFAT camera media.
+				fs::copy(target, &input)?;
+			}
+			Ok(PreparedInput::Linked {
+				input,
+				target: target.to_path_buf(),
+			})
+		}
+		Err(error) => Err(error),
+	}
+}
+
+fn temporary_input_path(target: &Path, source_ext: &str) -> Result<PathBuf> {
+	let parent = target.parent().ok_or_else(|| Error::NoParent(target.to_path_buf()))?;
+	let (stem, _) = split_extension(target).ok_or_else(|| Error::NoExtension(target.to_path_buf()))?;
+	Ok(parent.join(format!("{TEMP_IN_PREFIX}{stem}.{source_ext}")))
 }
 
 /// Restore a path to the source extension after a failed conversion.
@@ -211,6 +290,75 @@ mod tests {
 		assert!(matches!(error, Error::Exists(_)));
 		assert_eq!(fs::read(&occupied).unwrap(), b"existing");
 		assert!(renamed.exists());
+	}
+
+	#[test]
+	fn input_is_restored_to_the_source_name() {
+		let dir = tempdir();
+		let target = dir.path().join("photo.jpg");
+		fs::write(&target, b"heic bytes").unwrap();
+
+		let prepared = prepare_input(&target, "heic").unwrap();
+
+		assert_eq!(prepared.input(), dir.path().join("photo.heic"));
+		assert_eq!(prepared.target(), target);
+		assert!(!prepared.is_temporary());
+		// The bytes moved with the name, and no temporary file exists.
+		assert_eq!(fs::read(prepared.input()).unwrap(), b"heic bytes");
+		assert!(!target.exists());
+		assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+	}
+
+	#[test]
+	fn input_falls_back_to_a_link_when_the_source_name_is_taken() {
+		let dir = tempdir();
+		let target = dir.path().join("photo.jpg");
+		let occupied = dir.path().join("photo.heic");
+		fs::write(&target, b"heic bytes").unwrap();
+		fs::write(&occupied, b"someone else").unwrap();
+
+		let prepared = prepare_input(&target, "heic").unwrap();
+
+		assert!(prepared.is_temporary());
+		assert_eq!(prepared.input(), dir.path().join(".retype-in.photo.heic"));
+		assert_eq!(prepared.target(), target);
+		assert_eq!(fs::read(prepared.input()).unwrap(), b"heic bytes");
+		// The occupied name is untouched, and the target still holds the bytes.
+		assert_eq!(fs::read(&occupied).unwrap(), b"someone else");
+		assert!(target.exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn linked_input_shares_the_inode() {
+		use std::os::unix::fs::MetadataExt;
+
+		let dir = tempdir();
+		let target = dir.path().join("photo.jpg");
+		fs::write(dir.path().join("photo.heic"), b"occupied").unwrap();
+		fs::write(&target, b"heic bytes").unwrap();
+
+		let prepared = prepare_input(&target, "heic").unwrap();
+		let input_meta = fs::metadata(prepared.input()).unwrap();
+		let target_meta = fs::metadata(&target).unwrap();
+
+		assert_eq!(input_meta.ino(), target_meta.ino(), "a link, not a copy");
+	}
+
+	#[test]
+	fn temporary_input_is_removed_on_drop() {
+		let dir = tempdir();
+		let target = dir.path().join("photo.jpg");
+		fs::write(dir.path().join("photo.heic"), b"occupied").unwrap();
+		fs::write(&target, b"heic bytes").unwrap();
+
+		let input = {
+			let prepared = prepare_input(&target, "heic").unwrap();
+			prepared.input().to_path_buf()
+		};
+
+		assert!(!input.exists());
+		assert!(target.exists(), "the target is never removed by cleanup");
 	}
 
 	#[test]

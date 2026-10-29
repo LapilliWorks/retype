@@ -151,14 +151,29 @@ Rules, in order:
 2. If A is queued and has not started, cancel it and retarget: the job becomes `photo.heic` to `photo.webp`, with B's intent. Nothing was spent
 3. If A is running, cancel it, discard its partial outputs, and replace it the same way. The spent work is lost, and that is the intended outcome: the user kept changing their mind, and finishing the old job would produce a file they no longer want
 
-Replacement is not only a target change. Two details make it safe:
+Replacement is not only a target change. Two details make it safe, and the first one is not special to supersession:
 
-- **The source name is restored first.** A had renamed `photo.heic` to `photo.jpg` and not yet committed an output, so that path held the source bytes under the wrong extension. It is renamed back before the replacement starts. A previous job's target is never left lying while its replacement runs
+- **The source name is restored before any conversion**, by §5.4. A had renamed `photo.heic` to `photo.jpg` and not yet committed an output, so cancelling it leaves the source bytes at the wrong name; the replacement starts after that name is back
 - **The replacement consumes its source.** It reads `photo.heic`, writes `photo.webp`, and removes `photo.heic` on commit, because the rename that started the chain moved the file. A job therefore carries `consume_source`, true for rename-derived jobs and false for `retype convert`, which never deletes what it was given
 
 If the restored source name is already taken, by a file the user created or by another rename, the restore is refused and B becomes an ordinary job from A's target instead. A wrong file is worse than a second encode.
 
 The undo record follows the bytes, not the job: A's record already holds the source inode, so the replacement adopts it and A becomes `superseded`. One record, one restore target.
+
+## 5.4 Input naming
+
+A rename leaves the source bytes at the new name, so a converter reading the file directly sees the wrong extension: `photo.jpg` containing HEIC. There are two ways to give it a usable path.
+
+| Strategy | Effect during conversion | Crash leaves | exFAT |
+|---|---|---|---|
+| Restore the source name first | `photo.heic` (correct) | A correctly named file | No copy needed |
+| Temporary link to the old name | `photo.jpg` (wrong) | A mislabelled file plus a hidden link | Needs a full copy |
+
+Restore first, always. The file is renamed back to its source name before the conversion starts, so the name matches the bytes at every instant rather than only after commit. The temporary link survives as a fallback for the one case that defeats this: the source name being occupied by something else.
+
+The cost is visible and worth stating: during a long conversion the file shows its *source* name again, so a twenty minute video transcode looks like the rename was undone and then reapplied. That is honest, and it is preferable to a file that claims to be a JPEG for twenty minutes while holding HEVC.
+
+Because the file is at its source name, every rename-derived job has the same shape: read the source path, write each output, remove the source on commit. There is no in-place special case. A crash anywhere leaves either the correctly named source or a complete output, which is what reconciliation expects.
 
 ## 6. Startup reconciliation
 
