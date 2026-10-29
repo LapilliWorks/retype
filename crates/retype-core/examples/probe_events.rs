@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
-use retype_core::correlate::{Correlator, Identity, RenameFact, Sighting};
+use retype_core::correlate::{Correlator, Identity, RenameFact, Sighting, coalesce, dedupe};
 
 const SETTLE: Duration = Duration::from_millis(400);
 const QUIET: Duration = Duration::from_millis(200);
@@ -201,7 +201,7 @@ fn feed_pair(pair: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFact> {
 	}
 
 	pair.end_batch();
-	dedupe(facts)
+	coalesce(dedupe(facts))
 }
 
 /// Feed a debounced batch to the identity correlator.
@@ -240,22 +240,6 @@ fn feed_identity(identity: &mut Correlator, events: &[RawEvent]) -> Vec<RenameFa
 		}
 	}
 	facts
-}
-
-/// Linux reports the same rename three times, as `From`, `To` and `Both`, so a
-/// batch can produce the same fact more than once. The daemon has to dedupe per
-/// batch for the same reason.
-fn dedupe(facts: Vec<RenameFact>) -> Vec<RenameFact> {
-	let mut unique: Vec<RenameFact> = Vec::new();
-	for fact in facts {
-		if !unique
-			.iter()
-			.any(|seen| seen.source == fact.source && seen.target == fact.target)
-		{
-			unique.push(fact);
-		}
-	}
-	unique
 }
 
 fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>, settle: Duration) -> Vec<RawEvent> {

@@ -178,6 +178,57 @@ impl Correlator {
 	}
 }
 
+/// Remove duplicate facts within a batch.
+///
+/// Linux reports one rename as `From`, `To` and `Both`, so a feeder handling
+/// every shape can produce the same fact more than once.
+pub fn dedupe(facts: Vec<RenameFact>) -> Vec<RenameFact> {
+	let mut unique: Vec<RenameFact> = Vec::new();
+	for fact in facts {
+		let duplicate = unique
+			.iter()
+			.any(|seen| seen.source == fact.source && seen.target == fact.target);
+		if !duplicate {
+			unique.push(fact);
+		}
+	}
+	unique
+}
+
+/// Collapse rename chains inside one batch.
+///
+/// A platform that reports a rename as two events produces one fact per step,
+/// so `e.heic` to `e.jpg` to `e.webp` arrives as two facts with an intermediate
+/// the user never asked for. Converting the intermediate would re-encode twice
+/// and produce a file nobody requested, so a chain becomes one fact from the
+/// first source to the last target, keeping the last intent.
+///
+/// Only facts inside one batch are collapsed: a rename made minutes later is a
+/// separate gesture, and the user meant both.
+pub fn coalesce(facts: Vec<RenameFact>) -> Vec<RenameFact> {
+	let mut collapsed: Vec<RenameFact> = Vec::new();
+	// Target path of an earlier fact, mapped to its index in `collapsed`.
+	let mut produced: HashMap<PathBuf, usize> = HashMap::new();
+
+	for fact in facts {
+		match produced.remove(&fact.source) {
+			Some(index) => {
+				let earlier = &mut collapsed[index];
+				let target = fact.target.clone();
+				earlier.target = target.clone();
+				earlier.intent = fact.intent;
+				produced.insert(target, index);
+			}
+			None => {
+				produced.insert(fact.target.clone(), collapsed.len());
+				collapsed.push(fact);
+			}
+		}
+	}
+
+	collapsed
+}
+
 /// Whether two names describe an in-place rename with an intent.
 fn rename_between(source: &Path, target: &Path) -> Option<RenameFact> {
 	if source.parent() != target.parent() {
@@ -427,6 +478,94 @@ mod tests {
 		assert!(correlator.observe(sighting("/dir/a.jpg", 1)).is_none());
 		// `c` is still known.
 		assert!(correlator.observe(sighting("/dir/c.jpg", 3)).is_some());
+	}
+
+	#[test]
+	fn duplicates_are_removed() {
+		let fact = RenameFact {
+			source: PathBuf::from("/dir/a.heic"),
+			source_ext: "heic".into(),
+			target: PathBuf::from("/dir/a.jpg"),
+			intent: "jpg".into(),
+		};
+		let unique = dedupe(vec![fact.clone(), fact.clone()]);
+		assert_eq!(unique.len(), 1);
+	}
+
+	#[test]
+	fn chain_collapses_to_one_fact() {
+		let facts = vec![
+			RenameFact {
+				source: PathBuf::from("/dir/e.heic"),
+				source_ext: "heic".into(),
+				target: PathBuf::from("/dir/e.jpg"),
+				intent: "jpg".into(),
+			},
+			RenameFact {
+				source: PathBuf::from("/dir/e.jpg"),
+				source_ext: "jpg".into(),
+				target: PathBuf::from("/dir/e.webp"),
+				intent: "webp".into(),
+			},
+		];
+
+		let collapsed = coalesce(facts);
+
+		assert_eq!(collapsed.len(), 1);
+		assert_eq!(collapsed[0].source, PathBuf::from("/dir/e.heic"));
+		assert_eq!(collapsed[0].target, PathBuf::from("/dir/e.webp"));
+		assert_eq!(collapsed[0].intent, "webp");
+	}
+
+	#[test]
+	fn three_step_chain_collapses() {
+		let facts = vec![
+			RenameFact {
+				source: PathBuf::from("/dir/a.heic"),
+				source_ext: "heic".into(),
+				target: PathBuf::from("/dir/a.jpg"),
+				intent: "jpg".into(),
+			},
+			RenameFact {
+				source: PathBuf::from("/dir/a.jpg"),
+				source_ext: "jpg".into(),
+				target: PathBuf::from("/dir/a.png"),
+				intent: "png".into(),
+			},
+			RenameFact {
+				source: PathBuf::from("/dir/a.png"),
+				source_ext: "png".into(),
+				target: PathBuf::from("/dir/a.webp"),
+				intent: "webp".into(),
+			},
+		];
+
+		let collapsed = coalesce(facts);
+
+		assert_eq!(collapsed.len(), 1);
+		assert_eq!(collapsed[0].source, PathBuf::from("/dir/a.heic"));
+		assert_eq!(collapsed[0].target, PathBuf::from("/dir/a.webp"));
+		assert_eq!(collapsed[0].intent, "webp");
+	}
+
+	#[test]
+	fn unrelated_facts_are_not_collapsed() {
+		let facts = vec![
+			RenameFact {
+				source: PathBuf::from("/dir/a.heic"),
+				source_ext: "heic".into(),
+				target: PathBuf::from("/dir/a.jpg"),
+				intent: "jpg".into(),
+			},
+			RenameFact {
+				source: PathBuf::from("/dir/b.heic"),
+				source_ext: "heic".into(),
+				target: PathBuf::from("/dir/b.webp"),
+				intent: "webp".into(),
+			},
+		];
+
+		assert_eq!(coalesce(facts).len(), 2);
 	}
 
 	#[test]
