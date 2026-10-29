@@ -208,7 +208,20 @@ pub fn find_in_path(path_env: &OsStr, command: &str) -> Option<PathBuf> {
 }
 
 fn is_executable(path: &Path) -> bool {
-	path.is_file()
+	if !path.is_file() {
+		return false;
+	}
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		path.metadata()
+			.map(|meta| meta.permissions().mode() & 0o111 != 0)
+			.unwrap_or(false)
+	}
+	#[cfg(not(unix))]
+	{
+		true
+	}
 }
 
 #[cfg(test)]
@@ -282,13 +295,42 @@ mod tests {
 	#[test]
 	fn path_lookup_ignores_empty_entries() {
 		let dir = tempfile::tempdir().unwrap();
-		let script = dir.path().join("probe-tool");
+		// Lookup tries the `.exe` suffix first on Windows, so the fixture has to
+		// carry it there.
+		let name = if cfg!(windows) { "probe-tool.exe" } else { "probe-tool" };
+		let script = dir.path().join(name);
 		std::fs::write(&script, b"#!/bin/sh\nexit 0\n").unwrap();
+		make_executable(&script);
 
-		let path_env = std::ffi::OsString::from(format!(":/nonexistent:{}", dir.path().display()));
+		// The separator is platform specific, so build the value the same way
+		// the platform would, with an empty entry in the middle of it.
+		let path_env = std::env::join_paths([Path::new(""), Path::new("/nonexistent"), dir.path()]).unwrap();
+
 		assert!(find_in_path(&path_env, "probe-tool").is_some());
 		assert!(find_in_path(&path_env, "absent-tool").is_none());
 	}
+
+	#[cfg(unix)]
+	#[test]
+	fn non_executable_file_is_not_found() {
+		let dir = tempfile::tempdir().unwrap();
+		let script = dir.path().join("probe-tool");
+		std::fs::write(&script, b"not executable").unwrap();
+
+		let path_env = std::env::join_paths([dir.path()]).unwrap();
+		assert!(find_in_path(&path_env, "probe-tool").is_none());
+	}
+
+	#[cfg(unix)]
+	fn make_executable(path: &Path) {
+		use std::os::unix::fs::PermissionsExt;
+		let mut permissions = std::fs::metadata(path).unwrap().permissions();
+		permissions.set_mode(0o755);
+		std::fs::set_permissions(path, permissions).unwrap();
+	}
+
+	#[cfg(not(unix))]
+	fn make_executable(_path: &Path) {}
 
 	#[test]
 	fn tool_table_is_consistent() {
