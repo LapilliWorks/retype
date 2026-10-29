@@ -12,6 +12,7 @@ repository.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+notify = "8"
 tempfile = "3"
 
 [lints]
